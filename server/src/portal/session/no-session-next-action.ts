@@ -104,8 +104,8 @@ interface NextActionFacts {
    */
   init?: string;
   /**
-   * Several direct child folders are apps with a dev script, and this folder has no package.json.
-   * Absent or short means there is no choice to hand the agent. See `childDevApps`.
+   * Several direct child folders are web apps with a dev script, and this folder has no
+   * package.json. Absent or short means there is no choice to hand the agent. See `childDevApps`.
    */
   childApps?: readonly string[];
 }
@@ -429,10 +429,10 @@ export function nextActionFor(facts: NextActionFacts): NoSessionNextAction {
           action: NoSessionAction.START_DEV_SERVER,
           reason:
             notRunning +
-            `but this folder has no package.json, and ${childApps.length} child folders are apps ` +
-            `with a dev script: ${childApps.join(', ')}. Reticle cannot tell which one you mean, so ` +
-            'there is no command to hand you. Pick one, then run Reticle from that folder or ask ' +
-            'the human which app to start.' +
+            `but this folder has no package.json, and ${childApps.length} child folders are web ` +
+            `apps with a dev script: ${childApps.join(', ')}. Reticle cannot tell which one you ` +
+            'mean, so there is no command to hand you. Pick one, then run Reticle from that folder ' +
+            'or ask the human which app to start.' +
             stoppedNote,
         };
       }

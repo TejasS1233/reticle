@@ -9,9 +9,14 @@
  * Pure apart from one injected reader, so every case is a unit test rather than a temp directory.
  */
 
-import { readFileSync, readdirSync } from 'node:fs';
+import { accessSync, constants, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { RETICLE_NPM_PACKAGE, desktopLaunch, workspacePackageDirs } from '@reticlehq/init';
+import {
+  RETICLE_NPM_PACKAGE,
+  desktopLaunch,
+  isWebApp,
+  workspacePackageDirs,
+} from '@reticlehq/init';
 
 /** A dev script, as something an agent can actually run. */
 export interface DevCommand {
@@ -159,17 +164,42 @@ function devCommandFor(
 const NODE_MODULES = 'node_modules';
 const HIDDEN_PREFIX = '.';
 
+/** Whether the process can write in `path`. A folder it cannot write is never the app. */
+function isWritableDirectory(path: string): boolean {
+  try {
+    accessSync(path, constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * The direct child folders of `directory` that are apps with a dev command, sorted by name.
+ * Whether the package in `directory` is a web app, using init's own signal.
+ *
+ * A backend can have a dev script too, so the script alone is not enough. init already answers
+ * "is this a page somebody can open", and a second answer here would let the two disagree.
+ */
+function isWebAppAt(directory: string, read: (path: string) => string | undefined): boolean {
+  return isWebApp('.', {
+    exists: (path) => read(join(directory, path)) !== undefined,
+    readFile: (path) => read(join(directory, path)) ?? null,
+  });
+}
+
+/**
+ * The direct child folders of `directory` that are web apps with a dev command, sorted by name.
  *
  * Only for a folder with no package.json of its own. A task folder holds the app one level down, and
- * no workspace file lists it, so `workspacePackageDirs` never finds it. Folders that are not apps
- * (no package.json, or no dev script), `node_modules` and hidden folders are skipped.
+ * no workspace file lists it, so `workspacePackageDirs` never finds it. Folders that are not web apps
+ * (no package.json, no dev script, or a backend), folders this process cannot write, `node_modules`
+ * and hidden folders are skipped.
  */
 export function childDevApps(
   directory: string,
   read: (path: string) => string | undefined = readTextFile,
   listDirs: (path: string) => readonly string[] = readDirNames,
+  writable: (path: string) => boolean = isWritableDirectory,
 ): readonly string[] {
   if (read(join(directory, PACKAGE_JSON)) !== undefined) {
     return [];
@@ -178,7 +208,11 @@ export function childDevApps(
     .filter((name) => NODE_MODULES !== name && !name.startsWith(HIDDEN_PREFIX))
     .filter((name) => {
       const child = join(directory, name);
-      return devCommandFor(child, packageManager(child, read), read) !== undefined;
+      return (
+        writable(child) &&
+        isWebAppAt(child, read) &&
+        devCommandFor(child, packageManager(child, read), read) !== undefined
+      );
     })
     .sort();
 }
@@ -220,6 +254,7 @@ export function detectDevCommandInProject(
   directory: string,
   read: (path: string) => string | undefined = readTextFile,
   listDirs: (path: string) => readonly string[] = readDirNames,
+  writable: (path: string) => boolean = isWritableDirectory,
 ): DevCommand | undefined {
   const manager = packageManager(directory, read);
   const here = devCommandFor(directory, manager, read);
@@ -233,7 +268,7 @@ export function detectDevCommandInProject(
     read(join(directory, PACKAGE_JSON)) === undefined &&
     read(join(directory, PNPM_WORKSPACE)) === undefined
   ) {
-    const [only, ...others] = childDevApps(directory, read, listDirs);
+    const [only, ...others] = childDevApps(directory, read, listDirs, writable);
     if (0 < others.length) {
       return undefined;
     }
@@ -250,9 +285,13 @@ export function detectDevCommandInProject(
     listDirs: (path) => listDirs(join(directory, path)),
   });
   for (const sub of packages) {
-    const found = devCommandFor(join(directory, sub), manager, read);
-    if (found !== undefined) {
-      return { ...found, directory: sub };
+    const child = join(directory, sub);
+    if (!writable(child) || !isWebAppAt(child, read)) {
+      continue;
+    }
+    const command = devCommandFor(child, manager, read);
+    if (command !== undefined) {
+      return { ...command, directory: sub };
     }
   }
   return undefined;
@@ -270,11 +309,12 @@ export function initCommandIn(
   directory: string,
   read: (path: string) => string | undefined = readTextFile,
   listDirs: (path: string) => readonly string[] = readDirNames,
+  writable: (path: string) => boolean = isWritableDirectory,
 ): string {
   const manager = packageManager(directory, read);
   const berry = read(join(directory, YARN_BERRY_MARKER)) !== undefined;
   const runner = YARN === manager ? (berry ? YARN_DLX : NPX) : (RUNNER[manager] ?? NPX);
   const command = `${runner} ${RETICLE_NPM_PACKAGE} ${INIT_VERB}`;
-  const app = detectDevCommandInProject(directory, read, listDirs)?.directory;
+  const app = detectDevCommandInProject(directory, read, listDirs, writable)?.directory;
   return app === undefined ? command : `cd ${app} && ${command}`;
 }

@@ -180,10 +180,13 @@ describe('detectDevCommandInProject', () => {
   it('finds an app one directory down and names the directory', () => {
     const files = {
       [PKG]: JSON.stringify({ name: 'repo', private: true }),
-      [at('frontend/package.json')]: JSON.stringify({ scripts: { dev: 'vite' } }),
+      [at('frontend/package.json')]: JSON.stringify({
+        scripts: { dev: 'vite' },
+        devDependencies: { vite: '^7.0.0' },
+      }),
     };
     expect(
-      detectDevCommandInProject(DIR, reader(files), listing({ [ROOT]: ['frontend'] })),
+      detectDevCommandInProject(DIR, reader(files), listing({ [ROOT]: ['frontend'] }), () => true),
     ).toEqual({
       command: 'npm run dev',
       script: 'dev',
@@ -202,10 +205,13 @@ describe('detectDevCommandInProject', () => {
     const files = {
       [PKG]: JSON.stringify({}),
       [at('pnpm-lock.yaml')]: '',
-      [at('frontend/package.json')]: JSON.stringify({ scripts: { dev: 'vite' } }),
+      [at('frontend/package.json')]: JSON.stringify({
+        scripts: { dev: 'vite' },
+        devDependencies: { vite: '^7.0.0' },
+      }),
     };
     expect(
-      detectDevCommandInProject(DIR, reader(files), listing({ [ROOT]: ['frontend'] })),
+      detectDevCommandInProject(DIR, reader(files), listing({ [ROOT]: ['frontend'] }), () => true),
     ).toEqual({
       command: 'pnpm run dev',
       script: 'dev',
@@ -221,6 +227,29 @@ describe('detectDevCommandInProject', () => {
     expect(
       detectDevCommandInProject(DIR, reader(files), listing({ [ROOT]: ['frontend'] })),
     ).toBeUndefined();
+  });
+
+  it('picks the web workspace package over a backend workspace package', () => {
+    const files = {
+      [PKG]: JSON.stringify({ name: 'repo', workspaces: ['packages/*'] }),
+      [at('packages/api/package.json')]: JSON.stringify({
+        scripts: { dev: 'nest start' },
+        dependencies: { '@nestjs/core': '^10.0.0' },
+      }),
+      [at('packages/web/package.json')]: JSON.stringify({
+        scripts: { dev: 'vite' },
+        devDependencies: { vite: '^7.0.0' },
+      }),
+    };
+    const dirs = listing({
+      [ROOT]: ['packages'],
+      [join(DIR, 'packages')]: ['api', 'web'],
+    });
+    expect(detectDevCommandInProject(DIR, reader(files), dirs, () => true)).toEqual({
+      command: 'npm run dev',
+      script: 'dev',
+      directory: 'packages/web',
+    });
   });
 });
 
@@ -266,7 +295,7 @@ describe('initCommandIn', () => {
       [at('web/package.json')]: DEV_PKG,
     };
     const listing = (path: string): readonly string[] => (path === ROOT ? ['web'] : []);
-    expect(initCommandIn(DIR, reader(files), listing)).toBe(
+    expect(initCommandIn(DIR, reader(files), listing, () => true)).toBe(
       'cd web && pnpm dlx @reticlehq/server init',
     );
   });
@@ -283,12 +312,19 @@ describe('a folder with no package.json and child apps', () => {
     (entries: Record<string, string[]>): ((path: string) => readonly string[]) =>
     (path) =>
       entries[join(path)] ?? [];
-  const app = (script = 'dev'): string => JSON.stringify({ scripts: { [script]: 'vite' } });
+  const app = (script = 'dev'): string =>
+    JSON.stringify({ scripts: { [script]: 'vite' }, devDependencies: { vite: '^7.0.0' } });
+  const backend = (): string =>
+    JSON.stringify({
+      scripts: { dev: 'nest start' },
+      dependencies: { '@nestjs/core': '^10.0.0' },
+    });
+  const writable = (): boolean => true;
 
   it('finds the one child app, its command and its directory', () => {
     const files = { [at('MagicBook/package.json')]: app() };
     expect(
-      detectDevCommandInProject(DIR, reader(files), listing({ [ROOT]: ['MagicBook'] })),
+      detectDevCommandInProject(DIR, reader(files), listing({ [ROOT]: ['MagicBook'] }), writable),
     ).toEqual({ command: 'npm run dev', script: 'dev', directory: 'MagicBook' });
   });
 
@@ -298,7 +334,8 @@ describe('a folder with no package.json and child apps', () => {
       [at('MagicBook/pnpm-lock.yaml')]: '',
     };
     expect(
-      detectDevCommandInProject(DIR, reader(files), listing({ [ROOT]: ['MagicBook'] }))?.command,
+      detectDevCommandInProject(DIR, reader(files), listing({ [ROOT]: ['MagicBook'] }), writable)
+        ?.command,
     ).toBe('pnpm run dev');
   });
 
@@ -308,8 +345,29 @@ describe('a folder with no package.json and child apps', () => {
       [at('MagicBook/package.json')]: app(),
     };
     const dirs = listing({ [ROOT]: ['web', 'MagicBook'] });
-    expect(detectDevCommandInProject(DIR, reader(files), dirs)).toBeUndefined();
-    expect(childDevApps(DIR, reader(files), dirs)).toEqual(['MagicBook', 'web']);
+    expect(detectDevCommandInProject(DIR, reader(files), dirs, writable)).toBeUndefined();
+    expect(childDevApps(DIR, reader(files), dirs, writable)).toEqual(['MagicBook', 'web']);
+  });
+
+  it('picks the web app over a backend child that also has a dev script', () => {
+    const files = {
+      [at('backend/package.json')]: backend(),
+      [at('web/package.json')]: app(),
+    };
+    const dirs = listing({ [ROOT]: ['backend', 'web'] });
+    expect(detectDevCommandInProject(DIR, reader(files), dirs, writable)).toEqual({
+      command: 'npm run dev',
+      script: 'dev',
+      directory: 'web',
+    });
+    expect(childDevApps(DIR, reader(files), dirs, writable)).toEqual(['web']);
+  });
+
+  it('skips a web app in a folder this process cannot write', () => {
+    const files = { [at('web/package.json')]: app() };
+    const dirs = listing({ [ROOT]: ['web'] });
+    expect(childDevApps(DIR, reader(files), dirs, () => false)).toEqual([]);
+    expect(detectDevCommandInProject(DIR, reader(files), dirs, () => false)).toBeUndefined();
   });
 
   it('skips node_modules, hidden folders and folders that are not apps', () => {
@@ -321,8 +379,10 @@ describe('a folder with no package.json and child apps', () => {
       [at('MagicBook/package.json')]: app(),
     };
     const dirs = listing({ [ROOT]: ['node_modules', '.cache', 'lib', 'docs', 'MagicBook'] });
-    expect(childDevApps(DIR, reader(files), dirs)).toEqual(['MagicBook']);
-    expect(detectDevCommandInProject(DIR, reader(files), dirs)?.directory).toBe('MagicBook');
+    expect(childDevApps(DIR, reader(files), dirs, writable)).toEqual(['MagicBook']);
+    expect(detectDevCommandInProject(DIR, reader(files), dirs, writable)?.directory).toBe(
+      'MagicBook',
+    );
   });
 
   it('childDevApps ignores a folder that has its own package.json', () => {
@@ -330,12 +390,14 @@ describe('a folder with no package.json and child apps', () => {
       [PKG]: JSON.stringify({ name: 'repo' }),
       [at('MagicBook/package.json')]: app(),
     };
-    expect(childDevApps(DIR, reader(files), listing({ [ROOT]: ['MagicBook'] }))).toEqual([]);
+    expect(childDevApps(DIR, reader(files), listing({ [ROOT]: ['MagicBook'] }), writable)).toEqual(
+      [],
+    );
   });
 
   it('points init at the child app', () => {
     const files = { [at('MagicBook/package.json')]: app() };
-    expect(initCommandIn(DIR, reader(files), listing({ [ROOT]: ['MagicBook'] }))).toBe(
+    expect(initCommandIn(DIR, reader(files), listing({ [ROOT]: ['MagicBook'] }), writable)).toBe(
       'cd MagicBook && npx @reticlehq/server init',
     );
   });
