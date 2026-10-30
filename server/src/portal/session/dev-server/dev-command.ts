@@ -164,7 +164,7 @@ function devCommandFor(
 const NODE_MODULES = 'node_modules';
 const HIDDEN_PREFIX = '.';
 
-/** Whether the process can write in `path`. A folder it cannot write is never the app. */
+/** Whether the process can write in `path`. Asked of every web-app candidate — see `preferWebApps`. */
 function isWritableDirectory(path: string): boolean {
   try {
     accessSync(path, constants.W_OK);
@@ -188,12 +188,35 @@ function isWebAppAt(directory: string, read: (path: string) => string | undefine
 }
 
 /**
- * The direct child folders of `directory` that are web apps with a dev command, sorted by name.
+ * Web apps first, and of those the ones this process can write. When nothing here reads as a web
+ * app, every candidate comes back, in its original order.
+ *
+ * `isWebApp` is a detector, and a detector has gaps: a custom webpack or esbuild setup, a framework
+ * it does not know yet, a repository whose only candidate is a backend. Gating on it — as this code
+ * first did — hands the agent no next action where `main` hands it a command, and silence is the
+ * worse failure: a command that starts the wrong thing can be corrected, no command cannot. So the
+ * web-app check RANKS candidates instead of gating them.
+ *
+ * Writability is the exception: asked of the web apps only, where it is absolute. The reported bug
+ * (#2017) is a read-only backup copy sitting beside the real app, and a folder nobody can write must
+ * never be the one chosen while a writable sibling exists.
+ */
+function preferWebApps<T>(
+  candidates: readonly T[],
+  isWebAppCandidate: (candidate: T) => boolean,
+  isWritable: (candidate: T) => boolean,
+): readonly T[] {
+  const apps = candidates.filter(isWebAppCandidate);
+  return 0 < apps.length ? apps.filter(isWritable) : candidates;
+}
+
+/**
+ * The direct child folders of `directory` that are apps with a dev command, sorted by name: the web
+ * apps when there are any, every dev-script folder when there are none (see `preferWebApps`).
  *
  * Only for a folder with no package.json of its own. A task folder holds the app one level down, and
- * no workspace file lists it, so `workspacePackageDirs` never finds it. Folders that are not web apps
- * (no package.json, no dev script, or a backend), folders this process cannot write, `node_modules`
- * and hidden folders are skipped.
+ * no workspace file lists it, so `workspacePackageDirs` never finds it. `node_modules`, hidden
+ * folders and folders with no dev script are never candidates.
  */
 export function childDevApps(
   directory: string,
@@ -204,17 +227,18 @@ export function childDevApps(
   if (read(join(directory, PACKAGE_JSON)) !== undefined) {
     return [];
   }
-  return listDirs(directory)
+  const candidates = listDirs(directory)
     .filter((name) => NODE_MODULES !== name && !name.startsWith(HIDDEN_PREFIX))
     .filter((name) => {
       const child = join(directory, name);
-      return (
-        writable(child) &&
-        isWebAppAt(child, read) &&
-        devCommandFor(child, packageManager(child, read), read) !== undefined
-      );
+      return devCommandFor(child, packageManager(child, read), read) !== undefined;
     })
     .sort();
+  return preferWebApps(
+    candidates,
+    (name) => isWebAppAt(join(directory, name), read),
+    (name) => writable(join(directory, name)),
+  );
 }
 
 /** Directory names under `path`, or none when it cannot be read. */
@@ -284,17 +308,21 @@ export function detectDevCommandInProject(
     readFile: (path) => read(join(directory, path)) ?? null,
     listDirs: (path) => listDirs(join(directory, path)),
   });
+  const candidates: { sub: string; child: string; command: DevCommand }[] = [];
   for (const sub of packages) {
     const child = join(directory, sub);
-    if (!writable(child) || !isWebAppAt(child, read)) {
-      continue;
-    }
     const command = devCommandFor(child, manager, read);
     if (command !== undefined) {
-      return { ...command, directory: sub };
+      candidates.push({ sub, child, command });
     }
   }
-  return undefined;
+  // Same rule as the child folders above, so a workspace and a task folder cannot disagree.
+  const [first] = preferWebApps(
+    candidates,
+    (entry) => isWebAppAt(entry.child, read),
+    (entry) => writable(entry.child),
+  );
+  return first === undefined ? undefined : { ...first.command, directory: first.sub };
 }
 
 /**

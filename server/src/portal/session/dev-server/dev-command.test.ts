@@ -9,6 +9,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { join } from 'node:path';
+import { isWebApp } from '@reticlehq/init';
 import {
   childDevApps,
   detectDevCommand,
@@ -368,6 +369,30 @@ describe('a folder with no package.json and child apps', () => {
     const dirs = listing({ [ROOT]: ['web'] });
     expect(childDevApps(DIR, reader(files), dirs, () => false)).toEqual([]);
     expect(detectDevCommandInProject(DIR, reader(files), dirs, () => false)).toBeUndefined();
+  });
+
+  it('still returns a child whose setup no detector recognises', () => {
+    // The premise, pinned: a dev script and a page no detector reads as an app — a custom bundler
+    // or a framework init does not know yet. Excluding it would take away the command this project
+    // has always had, and the agent would have nothing to run at all.
+    const files = {
+      [at('custom/package.json')]: JSON.stringify({
+        scripts: { dev: 'node server.js' },
+        dependencies: { esbuild: '^0.19.0' },
+      }),
+    };
+    const dirs = listing({ [ROOT]: ['custom'] });
+    const io = {
+      exists: (path: string): boolean => reader(files)(at(join('custom', path))) !== undefined,
+      readFile: (path: string): string | null => reader(files)(at(join('custom', path))) ?? null,
+    };
+    expect(isWebApp('.', io)).toBe(false);
+    expect(childDevApps(DIR, reader(files), dirs, writable)).toEqual(['custom']);
+    expect(detectDevCommandInProject(DIR, reader(files), dirs, writable)).toEqual({
+      command: 'npm run dev',
+      script: 'dev',
+      directory: 'custom',
+    });
   });
 
   it('skips node_modules, hidden folders and folders that are not apps', () => {
